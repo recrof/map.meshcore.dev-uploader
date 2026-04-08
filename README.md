@@ -26,6 +26,14 @@ docker-compose up
 ```
 You will be able to inspect the logs. Once everything is working correctly, run the container with ``docker-compose up -d`` to run it in the background.
 
+### Configuration in Docker
+You can override default values with a .env file, such as:
+```sh
+# Set device to a wifi companion
+DEVICE=192.168.10.74:5000
+# Override timeout to 30 mins (if no adverts have been received within this time, the container will report unhealthy and restart automatically)
+ADVERT_TIMEOUT_MS=1800000
+```
 ## Running with Podman
 To avoid running with priveledged mode, podman can be used to build and run this image.
 

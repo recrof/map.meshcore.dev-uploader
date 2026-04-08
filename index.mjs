@@ -6,11 +6,45 @@ import {
 
 import { KeyPair } from './supercop/index.mjs';
 import crypto from 'crypto';
+import http from 'http';
 
 const device = process.argv[2] ?? '/dev/ttyACM0';
 const apiURL = 'https://map.meshcore.io/api/v1/uploader/node';
 const seenAdverts = {};
 let clientInfo = {};
+let isHealthy = false;
+const advertTimeoutMs = parseInt(process.env.ADVERT_TIMEOUT_MS ?? '300000', 10); // milliseconds
+let lastAdvertTime = null;
+
+// Wrapper for console methods that adds timestamp
+const formatLog = (level, ...args) => {
+  const timestamp = new Date().toISOString();
+  return [`[${timestamp}] [${level}]`, ...args];
+};
+
+const log = (...args) => console.log(...formatLog('INFO', ...args));
+const warn = (...args) => console.warn(...formatLog('WARN', ...args));
+const error = (...args) => console.error(...formatLog('ERROR', ...args));
+
+// Health check server
+http.createServer((req, res) => {
+  if (req.url === '/health') {
+    if (!isHealthy) {
+      res.writeHead(503);
+      res.end('Not Ready');
+    } else if (lastAdvertTime && Date.now() - lastAdvertTime > advertTimeoutMs) {
+      const timeoutSec = Math.floor(advertTimeoutMs / 1000);
+      res.writeHead(503);
+      res.end(`No adverts received in ${timeoutSec} seconds`);
+    } else {
+      res.writeHead(200);
+      res.end('OK');
+    }
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+}).listen(8080);
 
 const signData = async (kp, data) => {
   const json = JSON.stringify(data);
@@ -34,22 +68,24 @@ const processPacket = async (connection, rawPacket) => {
   const node = { pubKey, name: advert.parsed.name, ts: advert.timestamp, type: advert.parsed.type.toLowerCase() };
 
   if(!advert.isVerified()) {
-    console.warn('ignoring: signature verification failed', node);
+    warn('ignoring: signature verification failed', node);
     return;
   }
 
   if(seenAdverts[pubKey]) {
     if(seenAdverts[pubKey] >= advert.timestamp) {
-      console.warn('ignoring: possible replay attack', node);
+      warn('ignoring: possible replay attack', node);
       return;
     }
     if(advert.timestamp < seenAdverts[pubKey] + 3600) {
-      console.warn('ignoring: timestamp too new to reupload', node)
+      warn('ignoring: timestamp too new to reupload', node)
       return;
     }
   }
 
-  console.log(`uploading`, node);
+  lastAdvertTime = Date.now();
+
+  log(`uploading`, node);
   const data = {
     params: {
       freq: clientInfo.radioFreq / 1000,
@@ -70,13 +106,13 @@ const processPacket = async (connection, rawPacket) => {
 
   // console.debug('DEBUG: sent request', req);
 
-  console.log('sending', requestData)
-  console.log(await req.json());
+  log('sending', requestData)
+  log(await req.json());
 
   seenAdverts[pubKey] = advert.timestamp;
 }
 
-console.log(`Connecting to ${device}...`);
+log(`Connecting to ${device}...`);
 
 let connection;
 if(device.startsWith('/') || device.startsWith('COM')){
@@ -87,14 +123,30 @@ if(device.startsWith('/') || device.startsWith('COM')){
 }
 
 connection.on('connected', async () => {
-  console.log(`Connected.`);
+  log(`Connected.`);
+  isHealthy = true;
 
   connection.setManualAddContacts();
 
   clientInfo = await connection.getSelfInfo();
   clientInfo.kp = KeyPair.from({ publicKey: clientInfo.publicKey, secretKey: (await connection.exportPrivateKey()).privateKey });
 
-  console.log('Map uploader waiting for adverts...');
+  log('Map uploader waiting for adverts...');
+});
+
+connection.on('disconnected', () => {
+  log('Disconnected. Exiting...');
+  process.exit(1);
+});
+
+connection.on('close', () => {
+  log('Connection closed. Exiting...');
+  process.exit(1);
+});
+
+connection.on('error', (err) => {
+  error('Connection error:', err);
+  process.exit(1);
 });
 
 connection.on(Constants.PushCodes.LogRxData, async (event) => {
@@ -102,7 +154,7 @@ connection.on(Constants.PushCodes.LogRxData, async (event) => {
     await processPacket(connection, event.raw);
   }
   catch(e) {
-    console.error(e);
+    error(e);
   }
 });
 
